@@ -1,0 +1,15 @@
+[package]
+name = "slack-term"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+anyhow = "1.0.102"
+chrono = "0.4"
+crossterm = "0.29.0"
+dotenvy = "0.15.7"
+ratatui = { version = "0.30.0", features = ["unstable-rendered-line-info"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+slack-morphism = { version = "2.21.0", features = ["hyper"] }
+tokio = { version = "1.52.3", features = ["full"] }

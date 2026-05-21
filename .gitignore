@@ -1,0 +1,11 @@
+slack-term
+.env
+*.app/
+*.un~
+*.swp
+*.swo
+
+
+# Added by cargo
+
+/target
