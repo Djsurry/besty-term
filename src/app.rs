@@ -68,7 +68,12 @@ pub enum AppEvent {
     HistoryFailed(SlackChannelId, String),
     NewMessages(SlackChannelId, Vec<Msg>),
     ThreadReplies(SlackChannelId, SlackTs, Vec<Msg>),
-    SendOk,
+    // Server acked our optimistic send. Carries the placeholder ts we used
+    // when inserting locally and the real ts Slack assigned, so we can swap
+    // them in place and stay deduped against socket-mode delivery.
+    SendOk(SlackChannelId, SlackTs, SlackTs),
+    // Send failed — drop the optimistic message and surface the error.
+    SendFailed(SlackChannelId, SlackTs, String),
     Error(String),
 }
 
@@ -969,6 +974,19 @@ impl App {
                 // the parent + sibling replies, queue a fetch so the user
                 // sees the conversation in context rather than a lone "↳ …".
                 let entry = self.messages.entry(ch.clone()).or_default();
+                // Socket mode can deliver our own message before
+                // chat.postMessage's response races back. Drop any pending
+                // placeholder whose text matches an incoming msg from us so
+                // we don't briefly show duplicates.
+                let me = self.slack.me.clone();
+                let incoming_self_texts: HashSet<String> = msgs
+                    .iter()
+                    .filter(|m| m.user.as_ref() == Some(&me))
+                    .map(|m| m.text.clone())
+                    .collect();
+                if !incoming_self_texts.is_empty() {
+                    entry.retain(|m| !(m.pending && incoming_self_texts.contains(&m.text)));
+                }
                 let known: HashSet<_> = entry.iter().map(|m| m.ts.clone()).collect();
                 let mut thread_parents_to_fetch: Vec<SlackTs> = Vec::new();
                 let mut seen_parents: HashSet<SlackTs> = HashSet::new();
@@ -1011,7 +1029,38 @@ impl App {
                     self.mark_read_latest(&ch);
                 }
             }
-            AppEvent::SendOk => {}
+            AppEvent::SendOk(ch, pending_ts, real_ts) => {
+                if let Some(entry) = self.messages.get_mut(&ch) {
+                    // If socket mode already delivered the real message, just
+                    // drop the placeholder — otherwise swap its ts so the next
+                    // socket-mode delivery dedupes against it.
+                    let real_known = entry.iter().any(|m| m.ts == real_ts);
+                    if real_known {
+                        entry.retain(|m| m.ts != pending_ts);
+                    } else if let Some(m) = entry.iter_mut().find(|m| m.ts == pending_ts) {
+                        m.ts = real_ts.clone();
+                        m.pending = false;
+                    }
+                    entry.sort_by(|a, b| a.ts.0.cmp(&b.ts.0));
+                }
+                if let Some(conv) = self.convs.iter_mut().find(|c| c.id == ch) {
+                    let bump = conv
+                        .last_activity_ts
+                        .as_ref()
+                        .and_then(ts_seconds)
+                        .map(|cur| ts_seconds(&real_ts).unwrap_or(0.0) > cur)
+                        .unwrap_or(true);
+                    if bump {
+                        conv.last_activity_ts = Some(real_ts);
+                    }
+                }
+            }
+            AppEvent::SendFailed(ch, pending_ts, reason) => {
+                if let Some(entry) = self.messages.get_mut(&ch) {
+                    entry.retain(|m| m.ts != pending_ts);
+                }
+                self.error = Some((reason, Instant::now()));
+            }
             AppEvent::Error(msg) => {
                 self.error = Some((msg, Instant::now()));
             }
@@ -1037,16 +1086,48 @@ impl App {
         }
         self.input.clear();
         self.mention_popup = None;
+
+        // Drop the message into the thread immediately so the UI feels live.
+        // Format the placeholder ts the same way Slack does so it sorts to the
+        // bottom alongside real messages.
+        let now = chrono::Utc::now();
+        let pending_ts = SlackTs(format!(
+            "{}.{:06}",
+            now.timestamp(),
+            now.timestamp_subsec_micros()
+        ));
+        let optimistic = Msg {
+            ts: pending_ts.clone(),
+            user: Some(self.slack.me.clone()),
+            username: None,
+            text: text.clone(),
+            subtype: None,
+            thread_ts: None,
+            reply_count: 0,
+            pending: true,
+        };
+        let entry = self.messages.entry(c.id.clone()).or_default();
+        entry.push(optimistic);
+        entry.sort_by(|a, b| a.ts.0.cmp(&b.ts.0));
+        if let Some(conv) = self.convs.iter_mut().find(|cv| cv.id == c.id) {
+            conv.last_activity_ts = Some(pending_ts.clone());
+        }
+
         let tx = self.tx.clone();
         let slack = self.slack.clone();
         let ch = c.id.clone();
+        let pending_ts_async = pending_ts.clone();
         tokio::spawn(async move {
             match slack.post_message(&ch, &text).await {
-                Ok(_) => {
-                    let _ = tx.send(AppEvent::SendOk);
+                Ok(real_ts) => {
+                    let _ = tx.send(AppEvent::SendOk(ch, pending_ts_async, real_ts));
                 }
                 Err(e) => {
-                    let _ = tx.send(AppEvent::Error(format!("send: {e:#}")));
+                    let _ = tx.send(AppEvent::SendFailed(
+                        ch,
+                        pending_ts_async,
+                        format!("send: {e:#}"),
+                    ));
                 }
             }
         });

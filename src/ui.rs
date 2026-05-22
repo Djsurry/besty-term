@@ -488,6 +488,10 @@ fn render_messages(app: &App, msgs: &[crate::slack::Msg]) -> Vec<Line<'static>> 
                     .add_modifier(Modifier::BOLD)
             } else if is_match_line {
                 Style::default().fg(Color::Yellow)
+            } else if m.pending {
+                Style::default()
+                    .fg(Color::DarkGray)
+                    .add_modifier(Modifier::ITALIC)
             } else {
                 Style::default()
             };

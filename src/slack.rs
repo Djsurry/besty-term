@@ -59,6 +59,10 @@ pub struct Msg {
     pub thread_ts: Option<SlackTs>,
     // Number of replies if this message is a thread parent; 0 otherwise.
     pub reply_count: u32,
+    // True for messages we inserted optimistically before chat.postMessage
+    // returned. Swapped to false once the real ts comes back (or the entry is
+    // removed if the send failed).
+    pub pending: bool,
 }
 
 impl Msg {
@@ -76,6 +80,7 @@ impl Msg {
             subtype: m.subtype,
             thread_ts,
             reply_count: m.reply_count.unwrap_or(0),
+            pending: false,
         }
     }
 
@@ -98,6 +103,7 @@ impl Msg {
             subtype: e.subtype.as_ref().map(event_subtype_str),
             thread_ts,
             reply_count: 0,
+            pending: false,
         })
     }
 
