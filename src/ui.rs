@@ -231,8 +231,7 @@ fn draw_mention_popup(f: &mut Frame, app: &App, body_area: Rect, input_area: Rec
     let list = List::new(items).block(
         Block::default()
             .borders(Borders::ALL)
-            .title(title)
-            .style(Style::default().bg(Color::Black)),
+            .title(title),
     );
 
     f.render_widget(Clear, popup_area);
@@ -309,7 +308,7 @@ fn draw_input_or_search(f: &mut Frame, app: &App, area: Rect) {
         }
         Mode::Insert => {
             let lines = wrap_input(&app.input, inner_w);
-            let (cy, cx) = cursor_rowcol_multiline(&app.input, inner_w);
+            let (cy, cx) = cursor_rowcol_at(&app.input, app.input_cursor, inner_w);
             let body = lines.join("\n");
             let input = Paragraph::new(body)
                 .style(Style::default().fg(Color::White))
@@ -317,6 +316,20 @@ fn draw_input_or_search(f: &mut Frame, app: &App, area: Rect) {
                     Block::default()
                         .borders(Borders::ALL)
                         .title(" message (Enter send · Ctrl-J newline · Esc) "),
+                );
+            f.render_widget(input, area);
+            f.set_cursor_position((area.x + 1 + cx, area.y + 1 + cy));
+        }
+        Mode::InputNormal => {
+            let lines = wrap_input(&app.input, inner_w);
+            let (cy, cx) = cursor_rowcol_at(&app.input, app.input_cursor, inner_w);
+            let body = lines.join("\n");
+            let input = Paragraph::new(body)
+                .style(Style::default().fg(Color::White))
+                .block(
+                    Block::default()
+                        .borders(Borders::ALL)
+                        .title(" message [NORMAL] (hjkl · w/b · 0/$ · i/a · dd · diw · ciw) "),
                 );
             f.render_widget(input, area);
             f.set_cursor_position((area.x + 1 + cx, area.y + 1 + cy));
@@ -348,13 +361,17 @@ fn cursor_rowcol(chars_before: usize, width: u16) -> (u16, u16) {
 }
 
 // Cursor position for text that may contain literal newlines (Ctrl-J inserts).
-// Walks `text` the same way `wrap_input` does so the caret stays aligned with
-// what's actually rendered.
-fn cursor_rowcol_multiline(text: &str, width: u16) -> (u16, u16) {
+// Walks `text` up to `byte_pos` the same way `wrap_input` does so the caret
+// stays aligned with what's actually rendered.
+fn cursor_rowcol_at(text: &str, byte_pos: usize, width: u16) -> (u16, u16) {
     let w = width.max(1) as usize;
     let mut row: u16 = 0;
     let mut col: usize = 0;
-    for c in text.chars() {
+    let limit = byte_pos.min(text.len());
+    for (i, c) in text.char_indices() {
+        if i >= limit {
+            break;
+        }
         if c == '\n' {
             row = row.saturating_add(1);
             col = 0;
@@ -648,6 +665,10 @@ fn draw_statusline(f: &mut Frame, app: &App, area: Rect) {
         Mode::Insert => (
             " INSERT ",
             Style::default().bg(Color::Green).fg(Color::Black),
+        ),
+        Mode::InputNormal => (
+            " N-MSG  ",
+            Style::default().bg(Color::Blue).fg(Color::White),
         ),
         Mode::SidebarSearch => (
             " /CONV  ",

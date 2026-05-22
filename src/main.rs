@@ -170,6 +170,7 @@ fn handle_key(app: &mut App, key: KeyEvent) -> ControlFlow {
     match app.mode {
         Mode::Normal => handle_normal(app, key),
         Mode::Insert => handle_insert(app, key),
+        Mode::InputNormal => handle_input_normal(app, key),
         Mode::SidebarSearch => handle_sidebar_search(app, key),
         Mode::ChatSearch => handle_chat_search(app, key),
     }
@@ -282,43 +283,110 @@ fn handle_insert(app: &mut App, key: KeyEvent) -> ControlFlow {
     }
 
     match key.code {
-        KeyCode::Esc => app.mode = Mode::Normal,
+        KeyCode::Esc => {
+            app.close_mention_popup();
+            if app.input.is_empty() {
+                app.mode = Mode::Normal;
+            } else {
+                app.input_clamp_for_normal();
+                app.mode = Mode::InputNormal;
+            }
+        }
         KeyCode::Enter => {
             let _ = app.submit_input();
         }
         KeyCode::Backspace => {
-            app.input.pop();
+            app.input_backspace();
             if popup_open {
                 app.update_mention_query();
             }
         }
+        KeyCode::Left => app.input_cursor_left(),
+        KeyCode::Right => app.input_cursor_right(),
+        KeyCode::Home => app.input_cursor_line_start(),
+        KeyCode::End => app.input_cursor_line_end(),
         KeyCode::Char('j') if ctrl => {
-            app.input.push('\n');
+            app.input_insert_char('\n');
             app.close_mention_popup();
         }
         KeyCode::Char('u') if ctrl => {
-            app.input.clear();
+            app.input_clear();
             app.close_mention_popup();
         }
         KeyCode::Char('w') if ctrl => {
-            while app.input.ends_with(char::is_whitespace) {
-                app.input.pop();
-            }
-            while let Some(c) = app.input.chars().last() {
-                if c.is_whitespace() {
-                    break;
-                }
-                app.input.pop();
-            }
+            app.input_delete_word_back();
             app.close_mention_popup();
         }
         KeyCode::Char(c) => {
-            app.input.push(c);
+            app.input_insert_char(c);
             if popup_open {
                 app.update_mention_query();
             } else if c == '@' || c == '#' {
                 app.maybe_open_mention(c);
             }
+        }
+        _ => {}
+    }
+    ControlFlow::Continue
+}
+
+fn handle_input_normal(app: &mut App, key: KeyEvent) -> ControlFlow {
+    let was_pending_d = app.pending_input_d;
+    let was_pending_di = app.pending_input_di;
+    let was_pending_c = app.pending_input_c;
+    let was_pending_ci = app.pending_input_ci;
+    app.pending_input_d = false;
+    app.pending_input_di = false;
+    app.pending_input_c = false;
+    app.pending_input_ci = false;
+
+    match key.code {
+        KeyCode::Esc => {
+            if app.input.is_empty() {
+                app.mode = Mode::Normal;
+            }
+        }
+        KeyCode::Char('h') | KeyCode::Left => app.input_cursor_left(),
+        KeyCode::Char('l') | KeyCode::Right => app.input_cursor_right(),
+        KeyCode::Char('j') | KeyCode::Down => app.input_cursor_down(),
+        KeyCode::Char('k') | KeyCode::Up => app.input_cursor_up(),
+        KeyCode::Char('0') | KeyCode::Home => app.input_cursor_line_start(),
+        KeyCode::Char('$') | KeyCode::End => app.input_cursor_line_end(),
+        KeyCode::Char('b') => app.input_word_back(),
+        KeyCode::Char('w') => {
+            if was_pending_di {
+                app.input_delete_inner_word();
+            } else if was_pending_ci {
+                app.input_delete_inner_word();
+                app.mode = Mode::Insert;
+            } else {
+                app.input_word_forward();
+            }
+        }
+        KeyCode::Char('i') => {
+            if was_pending_d {
+                app.pending_input_d = false;
+                app.pending_input_di = true;
+            } else if was_pending_c {
+                app.pending_input_c = false;
+                app.pending_input_ci = true;
+            } else {
+                app.mode = Mode::Insert;
+            }
+        }
+        KeyCode::Char('a') => {
+            app.input_cursor_append();
+            app.mode = Mode::Insert;
+        }
+        KeyCode::Char('d') => {
+            if was_pending_d {
+                app.input_delete_line();
+            } else {
+                app.pending_input_d = true;
+            }
+        }
+        KeyCode::Char('c') => {
+            app.pending_input_c = true;
         }
         _ => {}
     }

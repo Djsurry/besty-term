@@ -15,6 +15,7 @@ use crate::state;
 pub enum Mode {
     Normal,
     Insert,
+    InputNormal,
     SidebarSearch,
     ChatSearch,
 }
@@ -98,6 +99,15 @@ pub struct App {
     pub sidebar_state: ListState,
     pub mode: Mode,
     pub input: String,
+    // Byte index into `input` for the editing cursor. Mid-string edits in
+    // Insert mode and motions in InputNormal mode both operate at this offset.
+    pub input_cursor: usize,
+    // Chord state for `dd`, `diw`, `ciw` in InputNormal. Scoped to the input
+    // so they don't collide with sidebar `dd` (App::pending_d).
+    pub pending_input_d: bool,
+    pub pending_input_di: bool,
+    pub pending_input_c: bool,
+    pub pending_input_ci: bool,
     pub status: String,
     pub error: Option<(String, Instant)>,
     pub message_scroll: u16,
@@ -143,6 +153,37 @@ fn ts_seconds(ts: &SlackTs) -> Option<f64> {
     ts.0.parse::<f64>().ok()
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CharCat {
+    Word,
+    Space,
+    Other,
+}
+
+fn char_cat(c: char) -> CharCat {
+    if c.is_alphanumeric() || c == '_' {
+        CharCat::Word
+    } else if c.is_whitespace() {
+        CharCat::Space
+    } else {
+        CharCat::Other
+    }
+}
+
+// Byte index `col` chars into the range `[start, end)`, clamped to `end`.
+fn byte_at_col(s: &str, start: usize, end: usize, col: usize) -> usize {
+    let mut taken = 0;
+    let mut byte = start;
+    for (i, c) in s[start..end].char_indices() {
+        if taken == col {
+            return start + i;
+        }
+        taken += 1;
+        byte = start + i + c.len_utf8();
+    }
+    byte.min(end)
+}
+
 impl App {
     pub fn new(slack: Arc<SlackContext>, tx: mpsc::UnboundedSender<AppEvent>) -> Self {
         let mut sidebar_state = ListState::default();
@@ -180,6 +221,11 @@ impl App {
             sidebar_state,
             mode: Mode::Normal,
             input: String::new(),
+            input_cursor: 0,
+            pending_input_d: false,
+            pending_input_di: false,
+            pending_input_c: false,
+            pending_input_ci: false,
             status,
             error: None,
             message_scroll: 0,
@@ -1085,6 +1131,7 @@ impl App {
             }
         }
         self.input.clear();
+        self.input_cursor = 0;
         self.mention_popup = None;
 
         // Drop the message into the thread immediately so the UI feels live.
@@ -1140,14 +1187,14 @@ impl App {
             '#' => MentionKind::Channel,
             _ => return,
         };
-        // Trigger has already been pushed onto `self.input`. Only open at the
-        // start of the input or after whitespace so we don't fire inside
+        // Trigger has already been inserted just before the cursor. Only open
+        // at the start of the input or after whitespace so we don't fire inside
         // emails ("user@host") or hashtags pasted from elsewhere.
         let trigger_len = trigger.len_utf8();
-        if self.input.len() < trigger_len {
+        if self.input_cursor < trigger_len {
             return;
         }
-        let anchor = self.input.len() - trigger_len;
+        let anchor = self.input_cursor - trigger_len;
         let prev = self.input[..anchor].chars().next_back();
         match prev {
             None => {}
@@ -1170,12 +1217,12 @@ impl App {
         };
         let anchor = popup.anchor;
         let trigger_len = 1; // both '@' and '#' are single-byte ASCII
-        if anchor + trigger_len > self.input.len() {
-            // Anchor char was deleted (e.g. backspace).
+        if anchor + trigger_len > self.input_cursor || self.input_cursor > self.input.len() {
+            // Anchor char was deleted, or the cursor moved before it.
             self.mention_popup = None;
             return;
         }
-        let tail = &self.input[anchor + trigger_len..];
+        let tail = &self.input[anchor + trigger_len..self.input_cursor];
         if tail.contains(char::is_whitespace) {
             // User moved past the mention boundary by typing a space.
             self.mention_popup = None;
@@ -1219,8 +1266,270 @@ impl App {
         self.input.truncate(popup.anchor);
         self.input.push_str(&entry.display);
         self.input.push(' ');
+        self.input_cursor = self.input.len();
         self.pending_mentions.push((entry.display, entry.token));
         true
+    }
+
+    // ---- input editing & vim-normal motions ----
+
+    pub fn input_insert_char(&mut self, c: char) {
+        self.input.insert(self.input_cursor, c);
+        self.input_cursor += c.len_utf8();
+    }
+
+    pub fn input_backspace(&mut self) {
+        if self.input_cursor == 0 {
+            return;
+        }
+        if let Some((i, c)) = self.input[..self.input_cursor].char_indices().last() {
+            self.input.replace_range(i..i + c.len_utf8(), "");
+            self.input_cursor = i;
+        }
+    }
+
+    pub fn input_clear(&mut self) {
+        self.input.clear();
+        self.input_cursor = 0;
+    }
+
+    // Ctrl-W: delete the whitespace + word immediately before the cursor.
+    pub fn input_delete_word_back(&mut self) {
+        let mut end = self.input_cursor;
+        while end > 0 {
+            let (i, c) = self.input[..end].char_indices().last().unwrap();
+            if !c.is_whitespace() {
+                break;
+            }
+            end = i;
+        }
+        let mut start = end;
+        while start > 0 {
+            let (i, c) = self.input[..start].char_indices().last().unwrap();
+            if c.is_whitespace() {
+                break;
+            }
+            start = i;
+        }
+        if start < self.input_cursor {
+            self.input.replace_range(start..self.input_cursor, "");
+            self.input_cursor = start;
+        }
+    }
+
+    // Bounds of the line containing `byte_idx`: [start, end) where end points
+    // at the terminating '\n' (or input.len() for the last line).
+    fn line_bounds(&self, byte_idx: usize) -> (usize, usize) {
+        let start = self.input[..byte_idx]
+            .rfind('\n')
+            .map(|i| i + 1)
+            .unwrap_or(0);
+        let end = self.input[byte_idx..]
+            .find('\n')
+            .map(|i| byte_idx + i)
+            .unwrap_or(self.input.len());
+        (start, end)
+    }
+
+    pub fn input_cursor_left(&mut self) {
+        let (line_start, _) = self.line_bounds(self.input_cursor);
+        if self.input_cursor <= line_start {
+            return;
+        }
+        if let Some((i, _)) = self.input[..self.input_cursor].char_indices().last() {
+            self.input_cursor = i;
+        }
+    }
+
+    pub fn input_cursor_right(&mut self) {
+        let (_, line_end) = self.line_bounds(self.input_cursor);
+        let Some(c) = self.input[self.input_cursor..].chars().next() else {
+            return;
+        };
+        let next = self.input_cursor + c.len_utf8();
+        if next > line_end {
+            return;
+        }
+        self.input_cursor = next;
+    }
+
+    pub fn input_cursor_line_start(&mut self) {
+        let (start, _) = self.line_bounds(self.input_cursor);
+        self.input_cursor = start;
+    }
+
+    pub fn input_cursor_line_end(&mut self) {
+        let (_, end) = self.line_bounds(self.input_cursor);
+        self.input_cursor = end;
+    }
+
+    pub fn input_cursor_down(&mut self) {
+        let (start, end) = self.line_bounds(self.input_cursor);
+        if end >= self.input.len() {
+            return;
+        }
+        let col = self.input[start..self.input_cursor].chars().count();
+        let next_start = end + 1;
+        let next_end = self.input[next_start..]
+            .find('\n')
+            .map(|i| next_start + i)
+            .unwrap_or(self.input.len());
+        self.input_cursor = byte_at_col(&self.input, next_start, next_end, col);
+    }
+
+    pub fn input_cursor_up(&mut self) {
+        let (start, _) = self.line_bounds(self.input_cursor);
+        if start == 0 {
+            return;
+        }
+        let col = self.input[start..self.input_cursor].chars().count();
+        let prev_end = start - 1;
+        let prev_start = self.input[..prev_end].rfind('\n').map(|i| i + 1).unwrap_or(0);
+        self.input_cursor = byte_at_col(&self.input, prev_start, prev_end, col);
+    }
+
+    pub fn input_word_forward(&mut self) {
+        let n = self.input.len();
+        if self.input_cursor >= n {
+            return;
+        }
+        let first = self.input[self.input_cursor..].chars().next().unwrap();
+        let start_cat = char_cat(first);
+        let mut i = self.input_cursor;
+        while i < n {
+            let c = self.input[i..].chars().next().unwrap();
+            if char_cat(c) != start_cat {
+                break;
+            }
+            i += c.len_utf8();
+        }
+        while i < n {
+            let c = self.input[i..].chars().next().unwrap();
+            if !c.is_whitespace() || c == '\n' {
+                break;
+            }
+            i += c.len_utf8();
+        }
+        self.input_cursor = i;
+    }
+
+    pub fn input_word_back(&mut self) {
+        if self.input_cursor == 0 {
+            return;
+        }
+        let mut i = self.input_cursor;
+        // Step back one to inspect the char before the cursor.
+        let (mut prev_i, mut prev_c) = self.input[..i].char_indices().last().unwrap();
+        // Skip trailing whitespace.
+        while prev_c.is_whitespace() && prev_c != '\n' {
+            i = prev_i;
+            if i == 0 {
+                self.input_cursor = 0;
+                return;
+            }
+            let (pi, pc) = self.input[..i].char_indices().last().unwrap();
+            prev_i = pi;
+            prev_c = pc;
+        }
+        let cat = char_cat(prev_c);
+        loop {
+            i = prev_i;
+            if i == 0 {
+                break;
+            }
+            let (pi, pc) = self.input[..i].char_indices().last().unwrap();
+            if char_cat(pc) != cat || pc == '\n' {
+                break;
+            }
+            prev_i = pi;
+        }
+        self.input_cursor = i;
+    }
+
+    pub fn input_delete_line(&mut self) {
+        let (start, end) = self.line_bounds(self.input_cursor);
+        if end < self.input.len() {
+            // Has a trailing '\n' — sweep it with the line.
+            self.input.replace_range(start..=end, "");
+            self.input_cursor = start.min(self.input.len());
+        } else if start > 0 {
+            // Last line, has a preceding '\n' — remove that too so we don't
+            // leave a stray blank line.
+            self.input.replace_range(start - 1..end, "");
+            let new_start = self.input[..start - 1]
+                .rfind('\n')
+                .map(|i| i + 1)
+                .unwrap_or(0);
+            self.input_cursor = new_start;
+        } else {
+            self.input.clear();
+            self.input_cursor = 0;
+        }
+    }
+
+    pub fn input_delete_inner_word(&mut self) {
+        if self.input.is_empty() {
+            return;
+        }
+        let cursor = self.input_cursor.min(self.input.len());
+        let cur = self.input[cursor..].chars().next();
+        let cat = match cur {
+            Some(c) if c != '\n' => char_cat(c),
+            _ => {
+                // No char under cursor — fall back to the char before it so
+                // `diw` at end of line still does something useful.
+                let Some((_, c)) = self.input[..cursor].char_indices().last() else {
+                    return;
+                };
+                if c == '\n' {
+                    return;
+                }
+                char_cat(c)
+            }
+        };
+        let mut start = cursor;
+        while start > 0 {
+            let (i, c) = self.input[..start].char_indices().last().unwrap();
+            if c == '\n' || char_cat(c) != cat {
+                break;
+            }
+            start = i;
+        }
+        let mut end = cursor;
+        while end < self.input.len() {
+            let c = self.input[end..].chars().next().unwrap();
+            if c == '\n' || char_cat(c) != cat {
+                break;
+            }
+            end += c.len_utf8();
+        }
+        if start < end {
+            self.input.replace_range(start..end, "");
+            self.input_cursor = start;
+        }
+    }
+
+    // Move cursor one char right past the current char so the next inserted
+    // char lands after it (vim `a`). Stops at end of line.
+    pub fn input_cursor_append(&mut self) {
+        let (_, line_end) = self.line_bounds(self.input_cursor);
+        if let Some(c) = self.input[self.input_cursor..].chars().next() {
+            let next = self.input_cursor + c.len_utf8();
+            if next <= line_end {
+                self.input_cursor = next;
+            }
+        }
+    }
+
+    // On Esc out of Insert, vim slides the cursor one char left (since Insert
+    // sits between chars and Normal sits on one). Match that for muscle memory.
+    pub fn input_clamp_for_normal(&mut self) {
+        let (line_start, _) = self.line_bounds(self.input_cursor);
+        if self.input_cursor > line_start {
+            if let Some((i, _)) = self.input[..self.input_cursor].char_indices().last() {
+                self.input_cursor = i;
+            }
+        }
     }
 
     fn compute_mention_matches(&self, kind: MentionKind, query: &str) -> Vec<MentionEntry> {
