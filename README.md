@@ -17,6 +17,8 @@ Heavily inspired by [erroneousboat/slack-term](https://github.com/erroneousboat/
 
 A Rust + ratatui TUI for reading and writing Slack messages. Sidebar of conversations (channels, DMs, MPIMs), threaded chat view, sidebar/chat search, vim-style navigation, mention autocomplete, socket-mode real-time delivery. Stays out of the way.
 
+Every line was written by Claude. I directed the work, but I didn't type any Rust.
+
 ## About the name
 
 "Besty" is the company I work at ([besty.ai](https://besty.ai)) — a small team that lives in Slack all day, and this is the client we wanted for ourselves. Nothing in the code is workspace-specific, so anyone's welcome to use it.
@@ -210,7 +212,3 @@ Measured on an M-series Mac, same workspace, same user, both apps fully signed i
 ² Time from `open -a Slack` until the renderer process is alive and drawing — comparable to "first frame" for the TUI. Slack continues loading the workspace for several more seconds; Besty Term is usable as soon as the first frame paints.
 
 Methodology: `du -sh` for disk, summed `ps -axo rss` for RAM, `ps -M` for threads, `lsof` for fds, `top -l 60 -s 1` for steady-state CPU/power, scripted `open -a` + process-watch for cold start. Reproduce the cold-start measurement yourself with `osascript -e 'tell application "Slack" to quit'` followed by `time open -a Slack`.
-
----
-
-<sub>Every line of code in this repo was written by Claude. I directed the work, reviewed the output, and shipped it — but I didn't type any Rust.</sub>
