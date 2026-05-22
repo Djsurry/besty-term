@@ -309,15 +309,14 @@ fn draw_input_or_search(f: &mut Frame, app: &App, area: Rect) {
         }
         Mode::Insert => {
             let lines = wrap_input(&app.input, inner_w);
-            let cursor_chars = app.input.chars().count();
-            let (cy, cx) = cursor_rowcol(cursor_chars, inner_w);
+            let (cy, cx) = cursor_rowcol_multiline(&app.input, inner_w);
             let body = lines.join("\n");
             let input = Paragraph::new(body)
                 .style(Style::default().fg(Color::White))
                 .block(
                     Block::default()
                         .borders(Borders::ALL)
-                        .title(" message (Enter to send · Esc) "),
+                        .title(" message (Enter send · Ctrl-J newline · Esc) "),
                 );
             f.render_widget(input, area);
             f.set_cursor_position((area.x + 1 + cx, area.y + 1 + cy));
@@ -346,6 +345,28 @@ fn cursor_rowcol(chars_before: usize, width: u16) -> (u16, u16) {
     let row = chars_before / w;
     let col = chars_before % w;
     (row as u16, col as u16)
+}
+
+// Cursor position for text that may contain literal newlines (Ctrl-J inserts).
+// Walks `text` the same way `wrap_input` does so the caret stays aligned with
+// what's actually rendered.
+fn cursor_rowcol_multiline(text: &str, width: u16) -> (u16, u16) {
+    let w = width.max(1) as usize;
+    let mut row: u16 = 0;
+    let mut col: usize = 0;
+    for c in text.chars() {
+        if c == '\n' {
+            row = row.saturating_add(1);
+            col = 0;
+            continue;
+        }
+        if col == w {
+            row = row.saturating_add(1);
+            col = 0;
+        }
+        col += 1;
+    }
+    (row, col as u16)
 }
 
 fn render_messages(app: &App, msgs: &[crate::slack::Msg]) -> Vec<Line<'static>> {

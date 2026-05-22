@@ -292,6 +292,10 @@ fn handle_insert(app: &mut App, key: KeyEvent) -> ControlFlow {
                 app.update_mention_query();
             }
         }
+        KeyCode::Char('j') if ctrl => {
+            app.input.push('\n');
+            app.close_mention_popup();
+        }
         KeyCode::Char('u') if ctrl => {
             app.input.clear();
             app.close_mention_popup();
