@@ -6,7 +6,7 @@
 
 <p align="center">
   A fast, vim-flavored Slack client that lives in your terminal.<br/>
-  <sub>~6 MB bundle · ~25 MB RAM · sub-second cold start</sub>
+  <sub>6 MB on disk · 27 MB RAM · single static binary</sub>
 </p>
 
 ---
@@ -190,9 +190,26 @@ mv BestyTerm.icns "Besty Term.app/Contents/Resources/"
 
 ---
 
-## Why this exists
+## Benchmarks
 
-Slack's desktop client uses ~1.2 GB of RAM across 8 Electron processes and weighs 292 MB on disk. This is a 6 MB bundle that does the day-to-day reading/writing in 25 MB of RAM. The full Slack workspace experience (huddles, canvases, file uploads, search across history, etc.) isn't here — but the 90% case (read a conversation, reply, see who's pinged you) is.
+Measured on an M-series Mac, same workspace, same user, both apps fully signed in. Slack measured fresh after launch (process tree settled). The 90% case (read a conversation, reply, see who's pinged you) is here — huddles, canvases, file uploads, and full-history search aren't.
+
+| | Besty Term | Slack | Delta |
+|---|---:|---:|---:|
+| **Disk (app bundle)** | 6.4 MB | 292 MB | **46× smaller** |
+| **RAM (resident, all procs)** | 27 MB¹ | 1,183 MB | **44× smaller** |
+| **Processes** | 1¹ | 7 | — |
+| **Threads** | 10 | 128 | **13× fewer** |
+| **Open file descriptors** | 88 | 393 | **4.5× fewer** |
+| **Cold start to first paint** | ~400 ms | ~800 ms² | **2× faster** |
+| **Idle CPU (60 s avg)** | 0.0% | 1.4% of one core | — |
+| **Idle energy (macOS `top` power score)** | 0.0 | 1.5 | — |
+
+¹ Core `slack-term` Rust binary only. The optional `Besty Term.app` bundle adds a vendored Alacritty terminal host (~110 MB RAM, +1 process) so it can run as a standalone Dock app.
+
+² Time from `open -a Slack` until the renderer process is alive and drawing — comparable to "first frame" for the TUI. Slack continues loading the workspace for several more seconds; Besty Term is usable as soon as the first frame paints.
+
+Methodology: `du -sh` for disk, summed `ps -axo rss` for RAM, `ps -M` for threads, `lsof` for fds, `top -l 60 -s 1` for steady-state CPU/power, scripted `open -a` + process-watch for cold start. Reproduce the cold-start measurement yourself with `osascript -e 'tell application "Slack" to quit'` followed by `time open -a Slack`.
 
 ---
 
